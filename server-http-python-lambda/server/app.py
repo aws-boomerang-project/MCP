@@ -213,7 +213,7 @@ def create_eks_cluster(
     control_role_name = "EKSServiceRole"
     try:
         control_role_arn = iam.get_role(RoleName=control_role_name)["Role"]["Arn"]
-    except iam.exceptions.NoSuchEntityException:
+    except:
         print(f"[INFO] Creating control plane IAM role: {control_role_name}")
         control_role = iam.create_role(
             RoleName=control_role_name,
@@ -235,7 +235,7 @@ def create_eks_cluster(
     node_role_name = "EKSNodeRole"
     try:
         node_role_arn = iam.get_role(RoleName=node_role_name)["Role"]["Arn"]
-    except iam.exceptions.NoSuchEntityException:
+    except:
         print(f"[INFO] Creating node IAM role: {node_role_name}")
         node_role = iam.create_role(
             RoleName=node_role_name,
@@ -290,7 +290,7 @@ def create_eks_cluster(
     response = eks.create_cluster(
         name=cluster_name,
         version=version,
-        roleArn=control_role_name,
+        roleArn=control_role_arn,
         resourcesVpcConfig={
             "subnetIds": subnet_ids,
             "securityGroupIds": [sg_id],
@@ -415,7 +415,7 @@ def create_eks_nodegroup() -> dict:
         subnets=private_subnets,
         instanceTypes=[instance_type],
         nodeRole=node_role_arn,
-        amiType="AL2023_x86_64",
+        amiType="AL2023_x86_64_STANDARD",
         diskSize=20,
         capacityType="ON_DEMAND"
     )
