@@ -202,7 +202,7 @@ def create_eks_cluster(
     public_cidrs = ["0.0.0.0/0"]
 
     # 0) 기존 EKS Cluster 존재 여부 확인
-    cluster_name = "my-cluster"
+    cluster_name = "my-cluster-1"
     existing_clusters = eks.list_clusters()["clusters"]
 
     if cluster_name in existing_clusters:
@@ -210,7 +210,7 @@ def create_eks_cluster(
         return  # 이미 있다면 더 이상 진행 안 함
 
     # 1) EKS Cluster IAM Role 확인 또는 생성
-    control_role_name = "EKSServiceRole"
+    control_role_name = "EKSSrviceRole"
     try:
         control_role_arn = iam.get_role(RoleName=control_role_name)["Role"]["Arn"]
     except:
@@ -332,31 +332,42 @@ def create_eks_cluster(
         except Exception as e:
             print(f"[ERROR] Failed to install addon '{addon}': {e}")
     
+    print(f"Access Entry 등록 시작")
     # 6) Access Entry 등록 함수
+    # 2024년을 기준으로 access policy를 코드로 붙일 수 없음. - 조회를 위해서는 콘솔로 직접 붙여야함
+    # [system:] 으로 시작하는 username을 사용할 수 없고 group name도 지정할 수 없음. (자동으로 설정됨)
     def ensure_eks_access_entries():
         access_entries = eks.list_access_entries(clusterName=cluster_name)["accessEntries"]
+        print("Access Entry 함수 내로 들어옴", access_entries)
         # node role
-        if not any(e["principalArn"] == node_role_arn for e in access_entries):
+        if not any(node_role_arn in e for e in access_entries):
+            print("Access Entry: Node role", node_role_arn)
             eks.create_access_entry(
                 clusterName=cluster_name,
                 principalArn=node_role_arn,
-                type="EC2_LINUX",
-                username="system:node:{{EC2PrivateDNSName}}",
-                groups=["system:nodes"]
+                type="EC2_LINUX"
             )
             print("[INFO] EKSNodeRole registered to access entries.")
-        # current caller (admin)
+        # current caller
         caller_arn = sts.get_caller_identity()["Arn"]
-        if not any(e["principalArn"] == caller_arn for e in access_entries):
+        if not any(caller_arn in e for e in access_entries):
+            print("Access Entry: Caller Admin")
             eks.create_access_entry(
                 clusterName=cluster_name,
                 principalArn=caller_arn,
-                type="STANDARD",
-                accessPolicies=[{
-                    "policyArn": "arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy"
-                }]
+                type="STANDARD"
             )
             print("[INFO] Admin caller registered to access entries.")
+        # Admin
+        account_id = sts.get_caller_identity()["Account"]
+        admin_role_arn = f"arn:aws:iam::{account_id}:role/Admin"
+        if not any(admin_role_arn in e for e in access_entries):
+            eks.create_access_entry(
+                clusterName=cluster_name,
+                principalArn=admin_role_arn,
+                type="STANDARD"
+            )
+            print("[INFO] Admin role registered with assumed-role style username.")
 
     ensure_eks_access_entries()
 
@@ -373,7 +384,7 @@ def create_eks_nodegroup() -> dict:
     ec2 = boto3.client("ec2")
     iam = boto3.client("iam")
 
-    cluster_name = "my-cluster"
+    cluster_name = "my-cluster-1"
     nodegroup_name = "my-ng"
     desired_size = 1
     min_size = 1
