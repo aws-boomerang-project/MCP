@@ -53,7 +53,7 @@ export class MCPConverseClient extends MCPClient {
         }
     }
 
-    async processUserInput(input: string): Promise<void> {
+    async processUserInput(input: string): Promise<string | void> {
         try {
             if (!input.trim()) {
                 return;
@@ -65,8 +65,10 @@ export class MCPConverseClient extends MCPClient {
             
             const response = await this.converseAgent.invokeWithPrompt(input);
             console.log(chalk.green('Assistant: ') + response);
+            return response;
         } catch (error) {
             console.error(chalk.red('Error: ') + error);
+            throw error;
         }
     }
 } 

@@ -1,6 +1,6 @@
 export const bedrockConfig = {
     modelId: process.env.BEDROCK_MODEL_ID || 'us.amazon.nova-pro-v1:0',
-    region: process.env.AWS_REGION || 'us-west-2',
+    region: process.env.AWS_REGION || 'us-east-1',
     systemPrompt: process.env.BEDROCK_SYSTEM_PROMPT || `You are a helpful assistant that can use tools to help you answer questions and perform tasks.
 
 When using tools, follow these guidelines to be efficient:
@@ -20,6 +20,6 @@ Remember: Each tool call is expensive, so use them judiciously while still provi
 };
 
 export const serverConfig = {
-    url: process.env.MCP_URL || 'http://localhost:3000',
-    apiToken: process.env.MCP_TOKEN || '123123'
+    url: process.env.MCP_URL || 'https://2pc6xe3ylc.execute-api.us-east-1.amazonaws.com/Prod/mcp',
+    apiToken: process.env.MCP_TOKEN || 'sunghj'
 }; 
