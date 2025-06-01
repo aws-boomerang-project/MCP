@@ -1,0 +1,53 @@
+{
+    "family": "mcp-client-task",
+    "networkMode": "awsvpc",
+    "requiresCompatibilities": ["FARGATE"],
+    "cpu": "256",
+    "memory": "512",
+    "runtimePlatform": {
+        "cpuArchitecture": "X86_64",
+        "operatingSystemFamily": "LINUX"
+    },
+    "executionRoleArn": "arn:aws:iam::867344467923:role/ecsTaskExecutionRole",
+    "taskRoleArn": "arn:aws:iam::867344467923:role/ecsTaskRole",
+    "containerDefinitions": [
+        {
+            "name": "mcp-client",
+            "portMappings": [
+                {
+                    "containerPort": 3000,
+                    "protocol": "tcp",
+                    "hostPort": 3000
+                }
+            ],
+            "image": "867344467923.dkr.ecr.us-east-1.amazonaws.com/mcp-client:latest",
+            "essential": true,
+            "environment": [
+                {
+                    "name": "NODE_ENV",
+                    "value": "production"
+                },
+                {
+                    "name": "MCP_URL",
+                    "value": "https://2pc6xe3ylc.execute-api.us-east-1.amazonaws.com/Prod/mcp"
+                },
+                {
+                    "name": "MCP_TOKEN",
+                    "value": "sunghj"
+                },
+                {
+                    "name": "AWS_REGION",
+                    "value": "us-east-1"
+                }
+            ],
+            "logConfiguration": {
+                "logDriver": "awslogs",
+                "options": {
+                    "awslogs-group": "/ecs/mcp-client-task",
+                    "awslogs-region": "us-east-1",
+                    "awslogs-stream-prefix": "ecs"
+                }
+            }
+        }
+    ]
+}
