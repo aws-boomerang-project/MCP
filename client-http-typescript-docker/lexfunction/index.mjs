@@ -22,7 +22,7 @@ export const handler = async (event) => {
                     type: 'ElicitIntent'  // Keep conversation open
                 },
                 intent: {
-                    name: 'ECSIntent',
+                    name: 'CaseRequestIntent',
                     slots: {
                         userMessage: {
                             value: userInput
@@ -47,7 +47,7 @@ export const handler = async (event) => {
                     type: 'ElicitIntent'
                 },
                 intent: {
-                    name: 'ECSIntent',
+                    name: 'CaseRequestIntent',
                     slots: event.sessionState.intent.slots,
                     state: 'InProgress'
                 }

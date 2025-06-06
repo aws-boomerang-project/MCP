@@ -109,9 +109,14 @@ docker tag ${ECR_REPO_NAME}:latest ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazo
 docker push ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO_NAME}:latest
 
 echo "$CURRENT_HASH" > "$HASH_FILE"
-# else
-#     echo "✅ No changes detected, using existing container"
-# fi
+
+# Create ECS service-linked role if it doesn't exist
+echo "🔄 Creating ECS service-linked role..."
+aws iam create-service-linked-role --aws-service-name ecs.amazonaws.com 2>/dev/null || true
+echo "✅ ECS service-linked role is ready"
+
+# Wait a few seconds for role propagation
+# sleep 5
 
 # Create ECS cluster if it doesn't exist
 echo "🔄 Creating ECS cluster..."
@@ -121,18 +126,44 @@ aws ecs create-cluster \
     --default-capacity-provider-strategy capacityProvider=FARGATE,weight=1 \
     --settings name=containerInsights,value=enabled
 
-# Get security group
-echo "🔄 Getting security group..."
+
+echo "🔄 Checking VPC..."
+VPC_ID=$(aws ec2 describe-vpcs --query 'Vpcs[0].VpcId' --output text)
+VPC_CIDR=$(aws ec2 describe-vpcs --vpc-ids $VPC_ID --query 'Vpcs[0].CidrBlock' --output text)
+
+echo "✅ Using VPC: $VPC_ID with CIDR: $VPC_CIDR"
+
+
+# Security Group Management
+echo "🔄 Setting up security groups..."
+# Check if security group exists
 SECURITY_GROUP=$(aws ec2 describe-security-groups \
-    --filters "Name=vpc-id,Values=vpc-053ec2ab2af382b97" \
-    --query 'SecurityGroups[?GroupName==`default`].GroupId' \
+    --filters "Name=vpc-id,Values=$VPC_ID" "Name=group-name,Values=mcp-client-sg" \
+    --query 'SecurityGroups[0].GroupId' \
     --output text)
 
-if [ -z "$SECURITY_GROUP" ]; then
-    echo "⚠️ No security group found, using default security group..."
-    SECURITY_GROUP=$(aws ec2 describe-security-groups \
-        --query 'SecurityGroups[?GroupName==`default`].GroupId' \
-        --output text | head -n 1)
+if [ "$SECURITY_GROUP" == "None" ] || [ -z "$SECURITY_GROUP" ]; then
+    echo "🆕 Creating security group..."
+    SECURITY_GROUP=$(aws ec2 create-security-group \
+        --group-name mcp-client-sg \
+        --description "Security group for MCP client" \
+        --vpc-id $VPC_ID \
+        --query 'GroupId' \
+        --output text)
+    
+    # Add inbound rules
+    echo "Adding inbound rules..."
+    aws ec2 authorize-security-group-ingress \
+        --group-id $SECURITY_GROUP \
+        --protocol tcp \
+        --port 80 \
+        --cidr 0.0.0.0/0
+    
+    aws ec2 authorize-security-group-ingress \
+        --group-id $SECURITY_GROUP \
+        --protocol tcp \
+        --port 3000 \
+        --cidr 0.0.0.0/0
 fi
 
 echo "✅ Using security group: $SECURITY_GROUP"
@@ -153,6 +184,76 @@ cat << EOF > bedrock-policy.json
     ]
 }
 EOF
+
+
+# Check and create ECS Task Execution Role
+echo "🔄 Checking ECS Task Execution Role..."
+TASK_EXECUTION_ROLE_NAME="ecsTaskExecutionRole"
+
+# Check if role exists
+ROLE_EXISTS=$(aws iam get-role --role-name $TASK_EXECUTION_ROLE_NAME 2>/dev/null || echo "false")
+
+if [ "$ROLE_EXISTS" == "false" ]; then
+    echo "🆕 Creating ECS Task Execution Role..."
+    
+    # Create trust policy document
+    cat << EOF > trust-policy.json
+{
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Effect": "Allow",
+            "Principal": {
+                "Service": "ecs-tasks.amazonaws.com"
+            },
+            "Action": "sts:AssumeRole"
+        }
+    ]
+}
+EOF
+
+    # Create the role
+    aws iam create-role \
+        --role-name $TASK_EXECUTION_ROLE_NAME \
+        --assume-role-policy-document file://trust-policy.json
+
+    # Attach required policies
+    aws iam attach-role-policy \
+        --role-name $TASK_EXECUTION_ROLE_NAME \
+        --policy-arn arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+
+    # Add additional permissions for ECR and CloudWatch
+    cat << EOF > task-execution-policy.json
+{
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Effect": "Allow",
+            "Action": [
+                "ecr:GetAuthorizationToken",
+                "ecr:BatchCheckLayerAvailability",
+                "ecr:GetDownloadUrlForLayer",
+                "ecr:BatchGetImage",
+                "logs:CreateLogStream",
+                "logs:PutLogEvents"
+            ],
+            "Resource": "*"
+        }
+    ]
+}
+EOF
+
+    aws iam put-role-policy \
+        --role-name $TASK_EXECUTION_ROLE_NAME \
+        --policy-name ecsTaskExecutionPolicy \
+        --policy-document file://task-execution-policy.json
+
+    # Wait for role to propagate
+    echo "⏳ Waiting for role to propagate..."
+    sleep 10
+fi
+
+echo "✅ ECS Task Execution Role is ready"
 
 # Checking if role exists
 ROLE_EXISTS=$(aws iam get-role --role-name ecsTaskRole --query 'Role.RoleName' --output text 2>/dev/null || true)
@@ -266,19 +367,156 @@ TASK_DEFINITION_ARN=$(aws ecs register-task-definition \
 echo "🔄 Creating CloudWatch log group..."
 aws logs create-log-group --log-group-name /ecs/${ECS_TASK_FAMILY} 2>/dev/null || true
 
-# Create ALB and target group if they don't exist
-echo "🔄 Checking if ALB exists..."
-ALB_ARN=$(aws elbv2 describe-load-balancers --names mcp-client-alb --query 'LoadBalancers[0].LoadBalancerArn' --output text 2>/dev/null || true)
+# Get VPC ID and CIDR block
+echo "🔄 Checking VPC..."
+VPC_ID=$(aws ec2 describe-vpcs --query 'Vpcs[0].VpcId' --output text)
+VPC_CIDR=$(aws ec2 describe-vpcs --vpc-ids $VPC_ID --query 'Vpcs[0].CidrBlock' --output text)
 
-if [ -z "$ALB_ARN" ]; then
-    echo "🆕 Creating Application Load Balancer..."
-    ALB_ARN=$(aws elbv2 create-load-balancer \
-        --name mcp-client-alb \
-        --subnets subnet-096220ee118b0809f subnet-083f09cf1cdd6ea69 \
-        --security-groups ${SECURITY_GROUP} \
-        --scheme internet-facing \
+echo "✅ Using VPC: $VPC_ID with CIDR: $VPC_CIDR"
+
+# Function to calculate subnet CIDR blocks based on VPC CIDR
+calculate_subnet_cidrs() {
+    local vpc_cidr=$1
+    local vpc_prefix=${vpc_cidr%/*}
+    local vpc_bits=${vpc_cidr#*/}
+    
+    # Extract first three octets of VPC CIDR
+    local base_prefix=$(echo $vpc_prefix | cut -d. -f1-3)
+    
+    # Calculate two different subnet CIDRs
+    echo "${base_prefix}.0/26"
+    echo "${base_prefix}.64/26"
+}
+
+# Get subnet CIDRs
+echo "🔄 Calculating subnet CIDRs..."
+SUBNET_CIDRS=($(calculate_subnet_cidrs "$VPC_CIDR"))
+SUBNET1_CIDR=${SUBNET_CIDRS[0]}
+SUBNET2_CIDR=${SUBNET_CIDRS[1]}
+
+echo "Calculated subnet CIDRs:"
+echo "Subnet 1: $SUBNET1_CIDR"
+echo "Subnet 2: $SUBNET2_CIDR"
+
+# Get available availability zones
+echo "🔄 Getting availability zones..."
+AVAILABILITY_ZONES=$(aws ec2 describe-availability-zones \
+    --query 'AvailabilityZones[?State==`available`].ZoneName' \
+    --output text)
+
+# Convert to array
+AZ_ARRAY=($AVAILABILITY_ZONES)
+
+# Create public subnets with calculated CIDRs
+echo "🆕 Creating public subnets..."
+SUBNET1=$(aws ec2 create-subnet \
+    --vpc-id $VPC_ID \
+    --cidr-block $SUBNET1_CIDR \
+    --availability-zone ${AZ_ARRAY[0]} \
+    --query 'Subnet.SubnetId' \
+    --output text) || {
+        echo "❌ Failed to create first subnet. Checking existing subnets..."
+        EXISTING_SUBNETS=$(aws ec2 describe-subnets \
+            --filters "Name=vpc-id,Values=$VPC_ID" \
+            --query 'Subnets[].SubnetId' \
+            --output text)
+        if [ ! -z "$EXISTING_SUBNETS" ]; then
+            SUBNET_ARRAY=($EXISTING_SUBNETS)
+            SUBNET1=${SUBNET_ARRAY[0]}
+            echo "✅ Using existing subnet: $SUBNET1"
+        else
+            echo "❌ No existing subnets found"
+            exit 1
+        fi
+    }
+
+SUBNET2=$(aws ec2 create-subnet \
+    --vpc-id $VPC_ID \
+    --cidr-block $SUBNET2_CIDR \
+    --availability-zone ${AZ_ARRAY[1]} \
+    --query 'Subnet.SubnetId' \
+    --output text) || {
+        echo "❌ Failed to create second subnet. Checking existing subnets..."
+        EXISTING_SUBNETS=$(aws ec2 describe-subnets \
+            --filters "Name=vpc-id,Values=$VPC_ID" \
+            --query 'Subnets[].SubnetId' \
+            --output text)
+        SUBNET_ARRAY=($EXISTING_SUBNETS)
+        if [ ${#SUBNET_ARRAY[@]} -gt 1 ]; then
+            SUBNET2=${SUBNET_ARRAY[1]}
+            echo "✅ Using existing subnet: $SUBNET2"
+        else
+            echo "❌ Not enough existing subnets found"
+            exit 1
+        fi
+    }
+
+echo "✅ Using subnets: $SUBNET1 and $SUBNET2"
+
+# Create and attach internet gateway if it doesn't exist
+echo "🌐 Checking Internet Gateway..."
+IGW_ID=$(aws ec2 describe-internet-gateways \
+    --filters "Name=attachment.vpc-id,Values=$VPC_ID" \
+    --query 'InternetGateways[0].InternetGatewayId' \
+    --output text)
+
+if [ -z "$IGW_ID" ] || [ "$IGW_ID" == "None" ]; then
+    echo "🆕 Creating Internet Gateway..."
+    IGW_ID=$(aws ec2 create-internet-gateway --query 'InternetGateway.InternetGatewayId' --output text)
+    aws ec2 attach-internet-gateway --vpc-id $VPC_ID --internet-gateway-id $IGW_ID
+fi
+
+# Create route table if it doesn't exist
+echo "🛣️ Creating route table..."
+ROUTE_TABLE_ID=$(aws ec2 describe-route-tables \
+    --filters "Name=vpc-id,Values=$VPC_ID" \
+    --query 'RouteTables[0].RouteTableId' \
+    --output text)
+
+if [ -z "$ROUTE_TABLE_ID" ] || [ "$ROUTE_TABLE_ID" == "None" ]; then
+    ROUTE_TABLE_ID=$(aws ec2 create-route-table --vpc-id $VPC_ID --query 'RouteTable.RouteTableId' --output text)
+fi
+
+# Add internet route
+aws ec2 create-route \
+    --route-table-id $ROUTE_TABLE_ID \
+    --destination-cidr-block 0.0.0.0/0 \
+    --gateway-id $IGW_ID 2>/dev/null || true
+
+# Associate subnets with route table
+aws ec2 associate-route-table --subnet-id $SUBNET1 --route-table-id $ROUTE_TABLE_ID 2>/dev/null || true
+aws ec2 associate-route-table --subnet-id $SUBNET2 --route-table-id $ROUTE_TABLE_ID 2>/dev/null || true
+
+# Enable auto-assign public IP
+aws ec2 modify-subnet-attribute --subnet-id $SUBNET1 --map-public-ip-on-launch
+aws ec2 modify-subnet-attribute --subnet-id $SUBNET2 --map-public-ip-on-launch
+
+echo "✅ Network configuration complete"
+
+
+# Create ALB with verified security group
+echo "🆕 Creating Application Load Balancer..."
+ALB_ARN=$(aws elbv2 create-load-balancer \
+    --name mcp-client-alb \
+    --subnets $SUBNET1 $SUBNET2 \
+    --security-groups $SECURITY_GROUP \
+    --scheme internet-facing \
+    --query 'LoadBalancers[0].LoadBalancerArn' \
+    --output text)
+
+if [ $? -ne 0 ]; then
+    echo "❌ Failed to create ALB. Checking if it already exists..."
+    ALB_ARN=$(aws elbv2 describe-load-balancers \
+        --names mcp-client-alb \
         --query 'LoadBalancers[0].LoadBalancerArn' \
-        --output text)
+        --output text 2>/dev/null || echo "")
+    
+    if [ -z "$ALB_ARN" ]; then
+        echo "❌ Could not create or find ALB"
+        exit 1
+    else
+        echo "✅ Using existing ALB: $ALB_ARN"
+    fi
 fi
 
 echo "🔄 Checking if target group exists..."
@@ -290,7 +528,7 @@ if [ -z "$TG_ARN" ]; then
         --name mcp-client-tg \
         --protocol HTTP \
         --port 3000 \
-        --vpc-id vpc-053ec2ab2af382b97 \
+        --vpc-id $VPC_ID \
         --target-type ip \
         --health-check-path /health \
         --health-check-interval-seconds 30 \
@@ -348,7 +586,7 @@ if aws ecs describe-services --cluster ${ECS_CLUSTER_NAME} --services ${ECS_SERV
         --service ${ECS_SERVICE_NAME} \
         --task-definition ${TASK_DEFINITION_ARN} \
         --force-new-deployment \
-        --network-configuration "awsvpcConfiguration={subnets=[subnet-096220ee118b0809f,subnet-083f09cf1cdd6ea69],securityGroups=[${SECURITY_GROUP}],assignPublicIp=ENABLED}" \
+        --network-configuration "awsvpcConfiguration={subnets=[$SUBNET1,$SUBNET2],securityGroups=[${SECURITY_GROUP}],assignPublicIp=ENABLED}" \
         --load-balancers "targetGroupArn=${TG_ARN},containerName=mcp-client,containerPort=3000"
 else
     echo "🆕 Creating new ECS service..."
@@ -358,7 +596,7 @@ else
         --task-definition ${TASK_DEFINITION_ARN} \
         --desired-count 1 \
         --launch-type FARGATE \
-        --network-configuration "awsvpcConfiguration={subnets=[subnet-096220ee118b0809f,subnet-083f09cf1cdd6ea69],securityGroups=[${SECURITY_GROUP}],assignPublicIp=ENABLED}" \
+        --network-configuration "awsvpcConfiguration={subnets=[$SUBNET1,$SUBNET2],securityGroups=[${SECURITY_GROUP}],assignPublicIp=ENABLED}" \
         --load-balancers "targetGroupArn=${TG_ARN},containerName=mcp-client,containerPort=3000"
 fi
 

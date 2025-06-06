@@ -8,8 +8,8 @@
         "cpuArchitecture": "X86_64",
         "operatingSystemFamily": "LINUX"
     },
-    "executionRoleArn": "arn:aws:iam::867344467923:role/ecsTaskExecutionRole",
-    "taskRoleArn": "arn:aws:iam::867344467923:role/ecsTaskRole",
+    "executionRoleArn": "arn:aws:iam::486909041631:role/ecsTaskExecutionRole",
+    "taskRoleArn": "arn:aws:iam::486909041631:role/ecsTaskRole",
     "containerDefinitions": [
         {
             "name": "mcp-client",
@@ -20,7 +20,7 @@
                     "hostPort": 3000
                 }
             ],
-            "image": "867344467923.dkr.ecr.us-east-1.amazonaws.com/mcp-client:latest",
+            "image": "486909041631.dkr.ecr.us-east-1.amazonaws.com/mcp-client:latest",
             "essential": true,
             "environment": [
                 {
